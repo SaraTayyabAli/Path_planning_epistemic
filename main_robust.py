@@ -149,18 +149,33 @@ def save_metrics(path, rows):
         writer.writerows(rows)
 
 
-def save_initial_bounds(path, planner, bounds, initial_state, robust_policy):
+def save_initial_bounds(
+    path,
+    planner,
+    bounds,
+    initial_state,
+    robust_policy,
+    robust_optimal_actions,
+    robust_q,
+):
+    margin = planner.action_margin(robust_q, initial_state)
+    optimal = set(robust_optimal_actions[initial_state])
+
     with open(path, "w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(
             [
                 "action",
-                "zeta_low_value",
-                "zeta_high_value",
+                "zeta_low_lower_backup",
+                "zeta_high_lower_backup",
+                "worst_case_zeta",
                 "lower_q",
                 "upper_q",
                 "q_width",
-                "selected",
+                "endpoint_span",
+                "robust_optimal",
+                "tie_break_selected",
+                "robust_action_margin",
             ]
         )
 
@@ -169,15 +184,81 @@ def save_initial_bounds(path, planner, bounds, initial_state, robust_policy):
             writer.writerow(
                 [
                     ACTION_NAMES[action],
-                    row["zeta_low_value"],
-                    row["zeta_high_value"],
+                    row["zeta_low_lower_backup"],
+                    row["zeta_high_lower_backup"],
+                    row["worst_case_zeta"],
                     row["lower_q"],
                     row["upper_q"],
                     row["q_width"],
+                    row["endpoint_span"],
+                    int(action in optimal),
                     int(robust_policy[initial_state] == action),
+                    margin,
                 ]
             )
 
+
+def save_policy_comparison(
+    path, planner, nominal_q, nominal_policy, robust_q, robust_policy, tolerance=1e-10
+):
+    fields = [
+        "robot",
+        "human",
+        "back_point",
+        "nominal_selected",
+        "robust_selected",
+        "nominal_optimal_actions",
+        "robust_optimal_actions",
+        "same_optimal_set",
+        "disjoint_optimal_sets",
+    ]
+
+    rows = []
+    set_difference = 0
+    disjoint = 0
+
+    for state in nominal_policy:
+        nominal_optimal = set(planner.optimal_actions(nominal_q, state, tolerance))
+        robust_optimal = set(planner.optimal_actions(robust_q, state, tolerance))
+        same_set = nominal_optimal == robust_optimal
+        no_overlap = nominal_optimal.isdisjoint(robust_optimal)
+
+        if not same_set:
+            set_difference += 1
+        if no_overlap:
+            disjoint += 1
+
+        rows.append(
+            {
+                "robot": state[0],
+                "human": state[1],
+                "back_point": state[2],
+                "nominal_selected": ACTION_NAMES[nominal_policy[state]],
+                "robust_selected": ACTION_NAMES[robust_policy[state]],
+                "nominal_optimal_actions": "|".join(
+                    ACTION_NAMES[a] for a in sorted(nominal_optimal)
+                ),
+                "robust_optimal_actions": "|".join(
+                    ACTION_NAMES[a] for a in sorted(robust_optimal)
+                ),
+                "same_optimal_set": int(same_set),
+                "disjoint_optimal_sets": int(no_overlap),
+            }
+        )
+
+    with open(path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    total = len(rows)
+    return {
+        "states_compared": total,
+        "optimal_set_difference_count": set_difference,
+        "optimal_set_difference_rate": set_difference / total if total else 0.0,
+        "disjoint_optimal_count": disjoint,
+        "disjoint_optimal_rate": disjoint / total if total else 0.0,
+    }
 
 def save_rollout(path, example):
     with open(path, "w", newline="", encoding="utf-8") as handle:
@@ -244,8 +325,8 @@ def main():
     ) = load_scenario(args.param)
 
     robust_cfg = param.get("robust", {})
-    zeta_low = args.zeta_low if args.zeta_low is not None else robust_cfg.get("zeta_low", 0.07)
-    zeta_high = args.zeta_high if args.zeta_high is not None else robust_cfg.get("zeta_high", 0.13)
+    zeta_low = args.zeta_low if args.zeta_low is not None else robust_cfg.get("zeta_low", 0.02)
+    zeta_high = args.zeta_high if args.zeta_high is not None else robust_cfg.get("zeta_high", 0.18)
     zeta_nominal = (
         args.zeta_nominal
         if args.zeta_nominal is not None
@@ -272,7 +353,7 @@ def main():
     print(f"zeta interval: [{zeta_low}, {zeta_high}]")
 
     nominal_start = time.perf_counter()
-    nominal_q, nominal_policy, _, nominal_iterations = planner.solve_nominal(
+    nominal_q, nominal_policy, nominal_iterations = planner.solve_nominal(
         zeta_nominal,
         tolerance=args.tolerance,
         max_iterations=args.max_iterations,
@@ -280,7 +361,15 @@ def main():
     nominal_time = time.perf_counter() - nominal_start
 
     robust_start = time.perf_counter()
-    robust_q, robust_policy, bounds, robust_iterations = planner.solve_robust(
+    (
+        robust_q,
+        upper_q,
+        robust_policy,
+        robust_optimal_actions,
+        bounds,
+        robust_iterations,
+        upper_iterations,
+    ) = planner.solve_robust(
         zeta_low,
         zeta_high,
         tolerance=args.tolerance,
@@ -288,12 +377,16 @@ def main():
     )
     robust_time = time.perf_counter() - robust_start
 
+    initial_robust_optimal = [
+        ACTION_NAMES[action] for action in robust_optimal_actions[initial_state]
+    ]
     print(
-        "initial action: nominal={}, robust={}".format(
+        "initial action: nominal={}, robust tie-break={}".format(
             ACTION_NAMES[nominal_policy[initial_state]],
             ACTION_NAMES[robust_policy[initial_state]],
         )
     )
+    print(f"robust-optimal initial actions: {initial_robust_optimal}")
     print(f"planning time: nominal={nominal_time:.3f}s, robust={robust_time:.3f}s")
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -325,6 +418,17 @@ def main():
         planner,
         bounds,
         initial_state,
+        robust_policy,
+        robust_optimal_actions,
+        robust_q,
+    )
+
+    policy_stats = save_policy_comparison(
+        output_dir / "policy_comparison.csv",
+        planner,
+        nominal_q,
+        nominal_policy,
+        robust_q,
         robust_policy,
     )
 
@@ -378,7 +482,7 @@ def main():
         robot_goal,
         human_goal,
         nominal_example,
-        f"Nominal policy, true zeta={zeta_nominal}",
+        f"Example trajectory under nominal policy, true zeta={zeta_nominal}",
     )
     plot_rollout(
         output_dir / "robust_path.png",
@@ -386,7 +490,7 @@ def main():
         robot_goal,
         human_goal,
         robust_example,
-        f"Robust interval policy, zeta in [{zeta_low}, {zeta_high}]",
+        f"Example trajectory under robust interval policy, zeta in [{zeta_low}, {zeta_high}]",
     )
 
     summary_lines = [
@@ -396,11 +500,16 @@ def main():
         f"zeta width: {zeta_high - zeta_low}",
         f"nominal zeta: {zeta_nominal}",
         f"nominal initial action: {ACTION_NAMES[nominal_policy[initial_state]]}",
-        f"robust initial action: {ACTION_NAMES[robust_policy[initial_state]]}",
+        f"robust tie-break initial action: {ACTION_NAMES[robust_policy[initial_state]]}",
+        f"robust-optimal initial actions: {initial_robust_optimal}",
+        f"robust action margin at initial state: {planner.action_margin(robust_q, initial_state)}",
         f"nominal iterations: {nominal_iterations}",
-        f"robust iterations: {robust_iterations}",
+        f"robust lower iterations: {robust_iterations}",
+        f"robust upper iterations: {upper_iterations}",
         f"nominal planning seconds: {nominal_time:.6f}",
         f"robust planning seconds: {robust_time:.6f}",
+        f"optimal action-set difference rate: {policy_stats['optimal_set_difference_rate']:.6f}",
+        f"disjoint optimal-action rate: {policy_stats['disjoint_optimal_rate']:.6f}",
         "",
         "The robust backup is min over the zeta interval, followed by max over robot actions.",
         "For this human model the Bellman target is affine in zeta, so checking both endpoints is exact.",

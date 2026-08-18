@@ -3,7 +3,7 @@ import random
 
 
 class HumanTransitionModel:
-    """Probability model used by the original human simulator, without sampling it."""
+    """Original human-motion probability rule, exposed without Monte Carlo sampling."""
 
     def __init__(self, env, goal):
         self.env = env
@@ -17,12 +17,12 @@ class HumanTransitionModel:
 
     def distribution(self, state, back_point, zeta):
         if state == self.goal:
-            return ((state, back_point, 1.0),)
+            return ((state, None, 1.0),)
 
         next_states = list(self.neighbors(state))
 
         if self.goal in next_states:
-            return ((self.goal, state, 1.0),)
+            return ((self.goal, None, 1.0),)
 
         if len(next_states) <= 1:
             return ((state, back_point, 1.0),)
@@ -33,17 +33,21 @@ class HumanTransitionModel:
 
         candidates = [s for s in next_states if s not in ignored_for_priority]
         if not candidates:
-            chosen = back_point if back_point is not None else state
-            next_back = state if chosen != state else back_point
-            return ((chosen, next_back, 1.0),)
+            if back_point is None:
+                return ((state, back_point, 1.0),)
+            # The original HumanAgent returns before updating back_point here.
+            return ((back_point, back_point, 1.0),)
 
         distances = [
             self.env.manhattan_distance(s, self.goal)
-            if s not in ignored_for_priority else float("inf")
+            if s not in ignored_for_priority
+            else float("inf")
             for s in next_states
         ]
         min_distance = min(distances)
-        preferred = {i for i, distance in enumerate(distances) if distance == min_distance}
+        preferred = {
+            i for i, distance in enumerate(distances) if distance == min_distance
+        }
 
         n_preferred = len(preferred)
         n_other = len(next_states) - n_preferred
@@ -65,7 +69,9 @@ class HumanTransitionModel:
 
         total = sum(probabilities.values())
         if not 0.999999 <= total <= 1.000001:
-            raise RuntimeError(f"Human transition probabilities sum to {total} at {state}")
+            raise RuntimeError(
+                f"Human transition probabilities sum to {total} at {state}"
+            )
 
         return tuple(
             (human_next, back_next, probability / total)

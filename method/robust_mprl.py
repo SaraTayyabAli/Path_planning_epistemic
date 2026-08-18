@@ -2,7 +2,7 @@ from human_transition import HumanTransitionModel
 
 
 class RobustQIteration:
-    """Statewise maximin Bellman solver for one human and interval-valued zeta."""
+    """Bellman solver for one human and interval-valued zeta."""
 
     def __init__(
         self,
@@ -42,13 +42,14 @@ class RobustQIteration:
         self._human_transition_cache = {}
 
     def _build_human_memory_states(self):
-        states = []
+        states = set()
         for human in self.robot_states:
-            states.append((human, None))
+            states.add((human, None))
+            states.add((human, human))
             for neighbor in self.human_model.neighbors(human):
                 if neighbor != human:
-                    states.append((human, neighbor))
-        return tuple(states)
+                    states.add((human, neighbor))
+        return tuple(sorted(states, key=lambda item: (item[0], str(item[1]))))
 
     def _human_transitions(self, human, back_point, zeta):
         key = (human, back_point, zeta)
@@ -69,14 +70,16 @@ class RobustQIteration:
         return reward
 
     def _empty_q(self):
-        q = {}
+        q_values = {}
         for state in self.states:
             robot = state[0]
             if robot == self.robot_goal:
-                q[state] = {}
+                q_values[state] = {}
             else:
-                q[state] = {action: 0.0 for action in self.legal_actions[robot]}
-        return q
+                q_values[state] = {
+                    action: 0.0 for action in self.legal_actions[robot]
+                }
+        return q_values
 
     def expected_target(self, state, action, q_values, zeta):
         robot, human, back_point = state
@@ -99,25 +102,59 @@ class RobustQIteration:
         return expected
 
     def solve_nominal(self, zeta, tolerance=1e-6, max_iterations=500):
-        return self._solve(
+        q_values, iterations = self._solve_envelope(
             zetas=(zeta,),
-            robust=False,
+            envelope="nominal",
             tolerance=tolerance,
             max_iterations=max_iterations,
         )
+        policy = self.greedy_policy(q_values)
+        return q_values, policy, iterations
 
-    def solve_robust(self, zeta_low, zeta_high, tolerance=1e-6, max_iterations=500):
+    def solve_robust(
+        self,
+        zeta_low,
+        zeta_high,
+        tolerance=1e-6,
+        max_iterations=500,
+        tie_tolerance=1e-10,
+    ):
         if zeta_low > zeta_high:
             raise ValueError("zeta_low must be smaller than or equal to zeta_high")
 
-        return self._solve(
-            zetas=(zeta_low, zeta_high),
-            robust=True,
+        zetas = (zeta_low, zeta_high)
+
+        lower_q, lower_iterations = self._solve_envelope(
+            zetas=zetas,
+            envelope="lower",
+            tolerance=tolerance,
+            max_iterations=max_iterations,
+        )
+        upper_q, upper_iterations = self._solve_envelope(
+            zetas=zetas,
+            envelope="upper",
             tolerance=tolerance,
             max_iterations=max_iterations,
         )
 
-    def _solve(self, zetas, robust, tolerance, max_iterations):
+        robust_policy = self.greedy_policy(lower_q)
+        optimal_actions = {
+            state: self.optimal_actions(lower_q, state, tie_tolerance)
+            for state in robust_policy
+        }
+        bounds = self._build_bounds(lower_q, upper_q, zeta_low, zeta_high)
+
+        return (
+            lower_q,
+            upper_q,
+            robust_policy,
+            optimal_actions,
+            bounds,
+            lower_iterations,
+            upper_iterations,
+        )
+
+    def _solve_envelope(self, zetas, envelope, tolerance, max_iterations):
         q_values = self._empty_q()
 
         for iteration in range(1, max_iterations + 1):
@@ -131,40 +168,76 @@ class RobustQIteration:
                         for zeta in zetas
                     ]
 
-                    # The human probabilities are affine in zeta, so the interval
-                    # minimum is attained at one of its endpoints.
-                    target = min(endpoint_values) if robust else endpoint_values[0]
+                    if envelope == "lower":
+                        target = min(endpoint_values)
+                    elif envelope == "upper":
+                        target = max(endpoint_values)
+                    else:
+                        target = endpoint_values[0]
+
                     new_q[state][action] = target
                     delta = max(delta, abs(target - old_value))
 
             q_values = new_q
             if delta < tolerance:
-                break
-        else:
-            raise RuntimeError("Robust Q iteration did not converge")
+                return q_values, iteration
 
-        policy = {
+        raise RuntimeError(f"{envelope.capitalize()} Q iteration did not converge")
+
+    def greedy_policy(self, q_values):
+        return {
             state: max(action_values, key=action_values.get)
             for state, action_values in q_values.items()
             if action_values
         }
 
-        bounds = {}
-        if robust:
-            for state, action_values in q_values.items():
-                for action in action_values:
-                    low_endpoint = self.expected_target(
-                        state, action, q_values, zetas[0]
-                    )
-                    high_endpoint = self.expected_target(
-                        state, action, q_values, zetas[-1]
-                    )
-                    bounds[(state, action)] = {
-                        "zeta_low_value": low_endpoint,
-                        "zeta_high_value": high_endpoint,
-                        "lower_q": min(low_endpoint, high_endpoint),
-                        "upper_q": max(low_endpoint, high_endpoint),
-                        "q_width": abs(high_endpoint - low_endpoint),
-                    }
+    @staticmethod
+    def optimal_actions(q_values, state, tolerance=1e-10):
+        action_values = q_values[state]
+        if not action_values:
+            return tuple()
 
-        return q_values, policy, bounds, iteration
+        best_value = max(action_values.values())
+        return tuple(
+            action
+            for action, value in action_values.items()
+            if best_value - value <= tolerance
+        )
+
+    @staticmethod
+    def action_margin(q_values, state):
+        values = sorted(q_values[state].values(), reverse=True)
+        if len(values) < 2:
+            return 0.0
+        return values[0] - values[1]
+
+    def _build_bounds(self, lower_q, upper_q, zeta_low, zeta_high):
+        bounds = {}
+
+        for state, action_values in lower_q.items():
+            for action in action_values:
+                low_backup = self.expected_target(
+                    state, action, lower_q, zeta_low
+                )
+                high_backup = self.expected_target(
+                    state, action, lower_q, zeta_high
+                )
+
+                lower_value = lower_q[state][action]
+                upper_value = upper_q[state][action]
+                if upper_value < lower_value and abs(upper_value - lower_value) < 1e-10:
+                    upper_value = lower_value
+
+                worst_case_zeta = zeta_low if low_backup <= high_backup else zeta_high
+
+                bounds[(state, action)] = {
+                    "zeta_low_lower_backup": low_backup,
+                    "zeta_high_lower_backup": high_backup,
+                    "worst_case_zeta": worst_case_zeta,
+                    "lower_q": lower_value,
+                    "upper_q": upper_value,
+                    "q_width": upper_value - lower_value,
+                    "endpoint_span": abs(high_backup - low_backup),
+                }
+
+        return bounds
