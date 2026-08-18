@@ -80,4 +80,4 @@ The interval width itself is `zeta_high - zeta_low`.
 ## Current scope
 
 The baseline intentionally uses one human. With the back-point memory included, the exact joint state already grows considerably. 
-The current implementation also assumes statewise (rectangular) interval uncertainty: the inner minimization over zeta is performed inside each Bellman backup. One useful question for the next meeting is whether zeta should instead be treated as one globally fixed unknown parameter for the complete episode.
+The current implementation also assumes statewise (rectangular) interval uncertainty: the inner minimization over zeta is performed inside each Bellman backup.
