@@ -1,8 +1,5 @@
 # Robust-RL baseline for interval uncertainty in zeta
 
-This folder keeps the original MPRL source files and adds a separate robust Bellman baseline.
-The original `main.py` and `method/mprl.py` are not used by `main_robust.py`.
-
 ## What changed
 
 The original pipeline learns robot paths first and applies the stochastic human model later during risk estimation. The robust baseline instead puts the human state inside the Bellman state:
