@@ -60,9 +60,9 @@ Human-aware robot navigation depends on assumptions about how people move. A nom
 
 This repository models that model uncertainty using an interval:
 
-\[
+$$
 \zeta \in [\zeta_{\mathrm{low}}, \zeta_{\mathrm{high}}].
-\]
+$$
 
 Here, `zeta` is the probability assigned to each non-preferred human move. A lower `zeta` produces more goal-directed and predictable motion; a higher `zeta` assigns more probability to deviations such as staying, reversing, moving laterally, or moving away from the goal.
 
@@ -84,20 +84,26 @@ The human model identifies the move or moves that minimize Manhattan distance to
 
 For `n_other` non-preferred moves and `n_preferred` preferred moves:
 
-\[
-P(\text{each non-preferred move}) = \zeta,
-\]
+The probability of each non-preferred move is
 
-\[
-P(\text{each preferred move}) =
-\frac{1 - n_{\mathrm{other}}\zeta}{n_{\mathrm{preferred}}}.
-\]
+$$
+P(\text{each non-preferred move}) = \zeta.
+$$
+
+The probability of each preferred move is
+
+$$
+P(\text{each preferred move})
+=
+\frac{1 - n_{\mathrm{other}}\zeta}
+     {n_{\mathrm{preferred}}}.
+$$
 
 The implementation validates that probabilities remain non-negative. Consequently, `zeta` must be small enough that:
 
-\[
+$$
 1 - n_{\mathrm{other}}\zeta \geq 0.
-\]
+$$
 
 The human state additionally stores `back_point`, which reduces the priority of immediately returning to the cell from which the human arrived.
 
@@ -105,13 +111,13 @@ The human state additionally stores `back_point`, which reduces the priority of 
 
 The robot receives:
 
-\[
+$$
 R =
 \begin{cases}
 R_{\mathrm{goal}}, & \text{if the robot enters its goal cell}, \\
 R_{\mathrm{step}}, & \text{otherwise}.
 \end{cases}
-\]
+$$
 
 A collision penalty is added if either of the following occurs:
 
@@ -133,13 +139,13 @@ These values should be treated as experimental parameters, not universal safety 
 
 For a fixed parameter `zeta`, the nominal Q-value update is:
 
-\[
+$$
 Q_{\zeta}(s,a) =
-\sum_{h',b'} P_{\zeta}(h',b'\mid h,b)
+\sum_{h',b'} P_{\zeta}(h',b' \mid h,b)
 \left[
 R(s,a,s') + \gamma \max_{a'} Q_{\zeta}(s',a')
 \right].
-\]
+$$
 
 The robot transition is deterministic; the expectation is over possible next human states.
 
@@ -147,45 +153,44 @@ The robot transition is deterministic; the expectation is over possible next hum
 
 For an uncertainty interval `[zeta_low, zeta_high]`, the lower-envelope robust backup is:
 
-\[
+$$
 Q^L(s,a) =
-\min_{\zeta \in \{\zeta_{\mathrm{low}},\zeta_{\mathrm{high}}\}}
+\min_{\zeta \in \{\zeta_{\mathrm{low}}, \zeta_{\mathrm{high}}\}}
 \mathbb{E}_{P_{\zeta}}
 \left[
 R + \gamma \max_{a'} Q^L(s',a')
 \right].
-\]
+$$
 
 The robust policy is:
 
-\[
+$$
 \pi_{\mathrm{robust}}(s)
 =
 \arg\max_a Q^L(s,a).
-\]
+$$
 
-This is a maximin decision rule: the robot chooses the action with the best worst-case endpoint value.
+This is a **maximin decision rule**: the robot chooses the action with the best worst-case endpoint value.
 
 The solver also computes an upper envelope:
 
-\[
+$$
 Q^U(s,a) =
-\max_{\zeta \in \{\zeta_{\mathrm{low}},\zeta_{\mathrm{high}}\}}
+\max_{\zeta \in \{\zeta_{\mathrm{low}}, \zeta_{\mathrm{high}}\}}
 \mathbb{E}_{P_{\zeta}}
 \left[
 R + \gamma \max_{a'} Q^U(s',a')
 \right].
-\]
+$$
 
 The interval width
 
-\[
+$$
 Q^U(s,a) - Q^L(s,a)
-\]
+$$
 
 quantifies long-horizon sensitivity to the modeled human uncertainty.
 
-> **Important uncertainty interpretation:** the current implementation uses a **statewise rectangular uncertainty set**. Since the minimum is applied at each Bellman backup, the adverse endpoint may effectively vary from state to state. This is more conservative than assuming one globally fixed but unknown `zeta` for a full episode.
 
 ---
 
@@ -307,236 +312,6 @@ from method.robust_mprl import RobustQIteration
 
 ---
 
-## Scenario configuration
-
-The default scenario path is:
-
-```text
-yaml/10x10_robust.yaml
-```
-
-A scenario should define robot, human, map, and robust-planning parameters. For example:
-
-```yaml
-agents:
-  start: [0, 0]
-  goal: [9, 9]
-
-humans:
-  human1:
-    start: [5, 2]
-    goal: [5, 9]
-
-map:
-  # Current Env implementation interprets dimensions as [height, width].
-  dimensions: [10, 10]
-  obstacles:
-    - [3, 3]
-    - [3, 4]
-    - [3, 5]
-
-robust:
-  gamma: 0.9
-  zeta_low: 0.02
-  zeta_nominal: 0.10
-  zeta_high: 0.18
-  budget: 20
-  step_reward: -0.1
-  goal_reward: 10.0
-  collision_penalty: -2.0
-```
-
-The current `main_robust.py` reads `gamma`, `zeta_low`, `zeta_nominal`, `zeta_high`, `budget`, and `collision_penalty` from YAML. To configure step and goal rewards from YAML, pass `step_reward` and `goal_reward` explicitly when constructing `RobustQIteration`.
-
-The nominal value should satisfy:
-
-\[
-\zeta_{\mathrm{low}}
-\leq
-\zeta_{\mathrm{nominal}}
-\leq
-\zeta_{\mathrm{high}}.
-\]
-
----
-
-## Running an experiment
-
-Run the default experiment:
-
-```bash
-python main_robust.py
-```
-
-Run a specific scenario:
-
-```bash
-python main_robust.py --param yaml/10x10_robust.yaml
-```
-
-Override interval parameters from the command line:
-
-```bash
-python main_robust.py \
-  --param yaml/10x10_robust.yaml \
-  --zeta-low 0.02 \
-  --zeta-nominal 0.10 \
-  --zeta-high 0.18
-```
-
-Run more evaluation rollouts:
-
-```bash
-python main_robust.py \
-  --simulation 500 \
-  --budget 30 \
-  --seed 42
-```
-
-Useful command-line arguments:
-
-| Argument | Default | Description |
-|---|---:|---|
-| `--param` | `yaml/10x10_robust.yaml` | YAML scenario file |
-| `--gamma` | YAML/default | Discount-factor override |
-| `--zeta-low` | YAML/default | Lower uncertainty endpoint |
-| `--zeta-high` | YAML/default | Upper uncertainty endpoint |
-| `--zeta-nominal` | YAML/default | Nominal human parameter |
-| `--simulation` | `100` | Evaluation episodes per policy and true parameter |
-| `--budget` | YAML/default | Maximum actions per episode |
-| `--tolerance` | `1e-6` | Q-iteration convergence tolerance |
-| `--max-iterations` | `500` | Maximum Q-iteration sweeps |
-| `--seed` | `123` | Base random seed |
-| `--output` | `results/robust_interval` | Parent results directory |
-
----
-
-## Outputs
-
-Each run creates a timestamped directory such as:
-
-```text
-results/robust_interval/20260820_120000/
-```
-
-The output directory contains:
-
-| File | Description |
-|---|---|
-| `config.json` | Complete run configuration and uncertainty assumption |
-| `metrics.csv` | Aggregate evaluation metrics for both policies at each true `zeta` |
-| `initial_q_bounds.csv` | Robust endpoint backups, lower/upper Q-values, widths, and initial action diagnostics |
-| `policy_comparison.csv` | Nominal and robust actions across the full joint state space |
-| `nominal_rollout.csv` | Example robot/human trajectory for the nominal policy |
-| `robust_rollout.csv` | Example robot/human trajectory for the robust policy |
-| `nominal_path.png` | Example nominal-policy path plot |
-| `robust_path.png` | Example robust-policy path plot |
-| `summary.txt` | Concise run summary, planning time, iterations, and policy-difference statistics |
-
-### Metrics
-
-The main evaluation metrics are:
-
-- **Success rate:** fraction of episodes in which the robot reaches its goal with zero recorded collisions;
-- **Average conflicts:** mean count of same-cell or edge-swap collisions per episode;
-- **Average reward:** rollout reward based on step, goal, and collision terms;
-- **Average path length:** mean number of states in the recorded robot trajectory;
-- **Planning time:** wall-clock time for nominal or robust solution;
-- **Iterations:** number of Q-iteration sweeps until convergence.
-
----
-
-## Interpreting results
-
-### Same nominal and robust path
-
-It is possible—and often correct—for the nominal and robust policies to select the same robot path. This happens when uncertainty changes Q-values but does not change the ranking of feasible robot actions.
-
-For example, both policies may prefer the direct route if it remains better than every detour even under the adverse endpoint.
-
-In that case, the robust result should be interpreted as a **policy-stability certificate** over the chosen uncertainty interval, rather than as a route-improvement result.
-
-To inspect whether robustness changes decisions, check:
-
-```text
-policy_comparison.csv
-initial_q_bounds.csv
-summary.txt
-```
-
-Particularly useful quantities are:
-
-- `q_width`: long-horizon uncertainty sensitivity for a state-action pair;
-- `endpoint_span`: one-step difference between endpoint backups;
-- `robust_action_margin`: separation between the best and second-best robust actions;
-- `optimal_set_difference_rate`: fraction of joint states where nominal and robust optimal action sets differ;
-- `disjoint_optimal_rate`: fraction of states where nominal and robust optimal action sets have no action in common.
-
-A visually identical single rollout does not prove two policies are identical across all states or stochastic human trajectories. For stronger analysis, compare actions only on states reached in many simulations under low, nominal, and high true `zeta` values.
-
-### When robust planning should differ
-
-Robust planning is most likely to select a different action when the map contains a genuine trade-off:
-
-```text
-Short route:  close to the human and uncertain collision exposure
-Long route:   slightly longer but spatially safer
-```
-
-A narrow shared corridor, crossing bottleneck, or route close to the human's likely path is more informative than an open map where robot and human rarely interact.
-
----
-
-## Limitations and current assumptions
-
-- **One human only:** the joint state space currently supports one human. Multiple humans cause combinatorial state-space growth.
-- **Full observability:** the robot policy receives the exact human position and `back_point`. This is not a POMDP or belief-space formulation.
-- **Stationary policy:** after planning, the robot does not estimate or update `zeta` online.
-- **Endpoint uncertainty:** the robust method evaluates `zeta_low` and `zeta_high`. The endpoint approach is valid for the current affine transition rule; it should be revalidated if the human model changes.
-- **Statewise rectangular uncertainty:** the robust solver allows adverse endpoint selection locally in the Bellman recursion. It does not represent one fixed, unknown global `zeta` throughout a rollout.
-- **Collision is non-terminal:** the default implementation penalizes collisions but permits the episode to continue. Choose terminal collision semantics if collision means physical safety failure.
-- **Evaluation reward check:** evaluation should count one step reward per executed action. Since a stored path includes its initial position, use `len(robot_path) - 1` when reconstructing total step reward.
-- **Computational cost:** robust planning is slower because it solves lower and upper envelope problems and evaluates two endpoint human models per robust backup.
-
----
-
-## Suggested experiments
-
-A useful experimental protocol is:
-
-1. Define a human-aware bottleneck map with a short risky route and a longer safer detour.
-2. Solve a nominal policy at `zeta_nominal`.
-3. Solve an interval-robust policy for `[zeta_low, zeta_high]`.
-4. Evaluate both policies under `zeta_low`, `zeta_nominal`, and `zeta_high`.
-5. Use multiple random seeds and report mean and variation across rollouts.
-6. Compare success rate, collisions, reward, path length, action disagreement on reachable states, Q-width, and planning time.
-7. Perform sensitivity sweeps over interval width and collision penalty.
-
-A robust planner is practically valuable when it either:
-
-- selects a safer alternative action in uncertainty-sensitive states;
-- improves worst-case collision-free success or reward; or
-- demonstrates that a nominal policy remains stable across a formally specified uncertainty set.
-
----
-
-## Future work
-
-Possible extensions include:
-
-- multiple humans with factored or approximate state representations;
-- online estimation of human behavior parameters;
-- belief-state planning under partial observability;
-- learned human motion models from trajectories;
-- nonlinear or multi-parameter uncertainty sets;
-- chance-constrained collision-risk objectives;
-- CVaR or distributionally robust objectives;
-- terminal collision modeling for strict safety tasks;
-- vectorized NumPy implementation or approximate dynamic programming for larger maps;
-- comparison against the original MPRL method and other nominal human-aware planning baselines.
-
----
-
 ## Citation
 
 If you use this repository in academic work, cite the associated thesis, report, or publication for this project. Add a BibTeX entry here once the work is publicly available.
@@ -552,6 +327,3 @@ If you use this repository in academic work, cite the associated thesis, report,
 
 ---
 
-## License
-
-Add a license file appropriate to your intended use and distribution, for example MIT, Apache-2.0, or a research-only license.
